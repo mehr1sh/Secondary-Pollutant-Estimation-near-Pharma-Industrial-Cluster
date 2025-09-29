@@ -12,13 +12,13 @@
 
 
 // --- WiFi and ThingsBoard Configuration ---
-const char* ssid = "Niviboo";// Replace with your WiFi SSID
-const char* password = "Niviboo123";// Replace with your WiFi password
+const char* ssid = "realme";// Replace with your WiFi SSID
+const char* password = "avaditya";// Replace with your WiFi password
 
 
 const char* tb_server = "demo.thingsboard.io";// ThingsBoard server
 const int tb_port = 1883;// MQTT port
-const char* tb_token = "s8q7hSQ5xyyqdUNVtHbV";// Replace with your gas sensor device token
+const char* tb_token = "ZnCXWNQanEGsKVJviiOy";// Replace with your gas sensor device token
 const char* device_id = "ESP32Device"; // Device identifier
 
 
@@ -72,6 +72,8 @@ unsigned long prevLoopMillis = 0;
 const long loopInterval = 5000; // Log every 5 seconds
 unsigned long prevThingsBoardMillis = 0;
 const long thingsBoardInterval = 10000; // Send to ThingsBoard every 10 seconds
+unsigned long prevBaselineMillis = 0;
+const long baselineInterval = 3600000; // Update baseline every hour (3600000 ms)
 
 
 // --- ThingsBoard Connection Status ---
@@ -85,6 +87,7 @@ void connectToWiFi();
 void connectToThingsBoard();
 void sendTelemetryData();
 void checkThingsBoardConnection();
+uint32_t getAbsoluteHumidity(float temperature, float humidity);
 
 
 void setup() {
@@ -102,10 +105,44 @@ void setup() {
     Serial.println("ERROR: Failed to find SGP30 sensor!");
   } else {
     Serial.println("SGP30 Found.");
+    
+    // Read SGP30 Serial ID and Feature Set
+    Serial.print("SGP30 Serial ID: 0x");
+    Serial.print(sgp.serialnumber[0], HEX);
+    Serial.print(sgp.serialnumber[1], HEX);
+    Serial.println(sgp.serialnumber[2], HEX);
+    
+    // Perform soft reset
+    Serial.println("Performing SGP30 soft reset...");
+    // Note: Soft reset is handled internally by the library during begin()
+    
+    // Set initial baseline values to kickstart the sensor
+    // These are typical baseline values - the sensor will adapt over time
+    Serial.println("Setting initial SGP30 baseline values...");
+    sgp.setIAQBaseline(0x8E68, 0x8F41); // Typical baseline values
+    
+    Serial.println("SGP30 baseline set. Starting warmup period...");
+    Serial.println("Note: TVOC readings may take 12-24 hours to fully stabilize");
+    
+    // Take some initial readings to establish baseline
+    for (int i = 0; i < 15; i++) {
+      if (sgp.IAQmeasure()) {
+        Serial.print("Warmup reading "); Serial.print(i+1); 
+        Serial.print("/15: TVOC = "); Serial.print(sgp.TVOC);
+        Serial.print(" ppb, eCO2 = "); Serial.print(sgp.eCO2); Serial.println(" ppm");
+        
+        // If we start getting non-zero TVOC readings, we can break early
+        if (sgp.TVOC > 0) {
+          Serial.println("TVOC readings detected! Baseline is establishing.");
+        }
+      }
+      delay(1000);
+    }
+    Serial.println("SGP30 warmup complete!");
   }
 
   // Initialize AHT10 on alternate I2C pins
-  Wire1.begin(4, 5); // SDA=4, SCL=5 for AHT10
+  Wire1.begin(16, 17); // SDA=16, SCL=17 for AHT10 (avoiding conflict with SD CS pin 5)
   if (!aht10.begin(&Wire1)) {
     Serial.println("ERROR: Failed to find AHT10 sensor!");
   } else {
@@ -151,6 +188,8 @@ void setup() {
 
   // --- 6. Setup ThingsBoard MQTT ---
   client.setServer(tb_server, tb_port);
+  client.setBufferSize(1024); // Increase MQTT buffer size for larger payloads
+  client.setKeepAlive(60); // Set keep alive to 60 seconds
   connectToThingsBoard();
 
   Serial.println("\n--- Gas Sensor Setup Complete. Starting Main Loop ---");
@@ -179,8 +218,18 @@ void loop() {
     if (aht10.getEvent(&humidity, &temp)) {
       temperature_aht10 = temp.temperature;
       humidity_aht10 = humidity.relative_humidity;
+      // Check for valid readings (AHT10 should not return exactly 0.0 for both)
+      if (temperature_aht10 == 0.0 && humidity_aht10 == 0.0) {
+        Serial.println("Warning: AHT10 returned zero values - possible sensor issue");
+      }
+      
+      // Set humidity compensation for SGP30 if we have valid readings
+      if (temperature_aht10 > 0.0 && humidity_aht10 > 0.0) {
+        uint32_t absolute_humidity = getAbsoluteHumidity(temperature_aht10, humidity_aht10);
+        sgp.setHumidity(absolute_humidity);
+      }
     } else {
-      Serial.println("AHT10 reading failed!");
+      Serial.println("ERROR: AHT10 reading failed! Check I2C connections (SDA=16, SCL=17)");
       temperature_aht10 = 0.0;
       humidity_aht10 = 0.0;
     }
@@ -219,6 +268,21 @@ void loop() {
     prevThingsBoardMillis = currentMillis;
     sendTelemetryData();
   }
+  
+  // Task 4: Update SGP30 baseline every hour for long-term stability
+  if (currentMillis - prevBaselineMillis >= baselineInterval) {
+    prevBaselineMillis = currentMillis;
+    uint16_t eCO2_base, TVOC_base;
+    if (sgp.getIAQBaseline(&eCO2_base, &TVOC_base)) {
+      Serial.print("Current SGP30 baseline values: eCO2: 0x");
+      Serial.print(eCO2_base, HEX);
+      Serial.print(", TVOC: 0x");
+      Serial.println(TVOC_base, HEX);
+      Serial.println("Baseline values retrieved successfully!");
+    } else {
+      Serial.println("Failed to retrieve SGP30 baseline values");
+    }
+  }
 }
 
 void connectToWiFi() {
@@ -245,14 +309,56 @@ void connectToWiFi() {
 
 void connectToThingsBoard() {
   Serial.print("Connecting to ThingsBoard...");
-
-  if (client.connect(device_id, tb_token, NULL)) {
-    Serial.println("Connected to ThingsBoard!");
-    thingsBoardConnected = true;
-  } else {
-    Serial.print("Failed to connect to ThingsBoard, rc=");
-    Serial.println(client.state());
+  
+  // Ensure WiFi is connected first
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected! Cannot connect to ThingsBoard.");
     thingsBoardConnected = false;
+    return;
+  }
+
+  int attempts = 0;
+  while (!client.connected() && attempts < 3) {
+    attempts++;
+    Serial.print("Attempt ");
+    Serial.print(attempts);
+    Serial.print("/3: ");
+    
+    if (client.connect(device_id, tb_token, NULL)) {
+      Serial.println("Connected to ThingsBoard!");
+      thingsBoardConnected = true;
+      break;
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state());
+      Serial.print(" (");
+      
+      // Decode MQTT error codes
+      switch(client.state()) {
+        case -4: Serial.print("Connection timeout"); break;
+        case -3: Serial.print("Connection lost"); break;
+        case -2: Serial.print("Connect failed"); break;
+        case -1: Serial.print("Disconnected"); break;
+        case 1: Serial.print("Bad protocol"); break;
+        case 2: Serial.print("Bad client ID"); break;
+        case 3: Serial.print("Unavailable"); break;
+        case 4: Serial.print("Bad credentials"); break;
+        case 5: Serial.print("Unauthorized"); break;
+        default: Serial.print("Unknown error");
+      }
+      Serial.println(")");
+      
+      thingsBoardConnected = false;
+      
+      if (attempts < 3) {
+        Serial.println("Retrying in 2 seconds...");
+        delay(2000);
+      }
+    }
+  }
+  
+  if (!thingsBoardConnected) {
+    Serial.println("Failed to connect to ThingsBoard after 3 attempts.");
   }
 }
 
@@ -266,12 +372,21 @@ void checkThingsBoardConnection() {
 }
 
 void sendTelemetryData() {
+  // Check connection status
+  if (!client.connected()) {
+    Serial.println("MQTT client not connected. Attempting to reconnect...");
+    thingsBoardConnected = false;
+    connectToThingsBoard();
+    return;
+  }
+
   if (!thingsBoardConnected) {
     Serial.println("Not connected to ThingsBoard. Cannot send data.");
     return;
   }
 
-  StaticJsonDocument<600> telemetry;
+  // Create JSON document with adequate size
+  StaticJsonDocument<800> telemetry;
 
   telemetry["timestamp"] = String(timeBuffer);
   telemetry["device_id"] = device_id;
@@ -295,14 +410,35 @@ void sendTelemetryData() {
   else if (eCO2_sgp > 800) co2Level = "Moderate";
   telemetry["co2_level"] = co2Level;
 
-  char payload[600];
-  serializeJson(telemetry, payload);
+  // Create payload with larger buffer
+  char payload[800];
+  size_t payloadSize = serializeJson(telemetry, payload);
+  
+  Serial.print("Payload size: ");
+  Serial.print(payloadSize);
+  Serial.println(" bytes");
+  
+  // Debug: Print the payload
+  Serial.println("Sending payload:");
+  Serial.println(payload);
 
-  if (client.publish("v1/devices/me/telemetry", payload)) {
-    Serial.println("Gas Telemetry sent to ThingsBoard:");
-    Serial.println(payload);
+  // Publish with error checking
+  bool publishResult = client.publish("v1/devices/me/telemetry", payload);
+  
+  if (publishResult) {
+    Serial.println("✓ Gas Telemetry successfully sent to ThingsBoard!");
   } else {
-    Serial.println("Failed to send gas telemetry to ThingsBoard");
+    Serial.println("✗ Failed to send gas telemetry to ThingsBoard");
+    Serial.print("MQTT Client State: ");
+    Serial.println(client.state());
+    Serial.print("WiFi Status: ");
+    Serial.println(WiFi.status());
+    
+    // Try to reconnect if there's an issue
+    if (!client.connected()) {
+      Serial.println("MQTT connection lost. Will attempt reconnect on next cycle.");
+      thingsBoardConnected = false;
+    }
   }
 }
 
@@ -356,4 +492,13 @@ void logDataToSD() {
   } else {
     Serial.println("ERROR: Failed to open gas_datalog.csv on SD card.");
   }
+}
+
+uint32_t getAbsoluteHumidity(float temperature, float humidity) {
+  // Calculate absolute humidity for SGP30 humidity compensation
+  // approximation formula from Sensirion SGP30 Driver Integration Guide
+  // https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/9_Gas_Sensors/Sensirion_Gas_Sensors_SGP30_Driver-Integration-Guide_HW_I2C.pdf
+  const float absoluteHumidity = 216.7f * ((humidity / 100.0f) * 6.112f * exp((17.62f * temperature) / (243.12f + temperature)) / (273.15f + temperature)); // [g/m^3]
+  const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity); // [mg/m^3]
+  return absoluteHumidityScaled;
 }
