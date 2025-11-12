@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-This project is an **Environmental Monitoring System** designed to measure air quality and environmental parameters near pharmaceutical industries during festive periods like Diwali. The system uses multiple sensors connected to an ESP32 microcontroller to collect real-time data on pollutants, temperature, humidity, and UV radiation. All data is logged locally on an SD card and uploaded to ThingSpeak cloud platform for remote monitoring.
+This project is an **Environmental Monitoring System** designed to measure air quality and environmental parameters near pharmaceutical industries. The system uses multiple sensors connected to an ESP32 microcontroller to collect real-time data on pollutants, temperature, humidity, and UV radiation. All data is logged locally on an SD card and uploaded to ThingSpeak cloud platform for remote monitoring.
 
 ## Motivation
 
-Diwali firecracker usage causes sudden spikes in air pollution, particularly particulate matter (PM2.5, PM10) and volatile organic compounds (VOCs). Our system was designed to accurately capture and analyze these pollution events near industrial areas to understand their environmental impact and validate sensor reliability.
+Our system was designed to accurately capture and analyze pollution events near industrial areas to understand their environmental impact and validate sensor reliability.
 
 ## Hardware Components
 
@@ -100,11 +100,18 @@ Each system has independent ESP32, power supply, and SD card to prevent single-p
 ```
 project/
 ├── final_codes/
-│   └── main_sensor_code.cpp (or .ino)
+│   └── integrated_all_sensors.ino
+│   └── sensor_gas.ino
+│   └── sensor_pm.ino
 ├── test_codes/
-│   └── AHT10_test_code.cpp
+│   └── test_AHT10.ino
+│   └── test_MiCS2714.ino
+│   └── test_mq135.ino
+│   └── test_sds011.ino
+│   └── test_sgp30.ino
 ├── csv_files/
-│   └── env_data.csv (generated at runtime)
+│   └── activity_log_variance.csv (generated at runtime)
+│   └── gen_csv.py
 ├── diwali_report.pdf
 ├── README.md (this file)
 └── plots/ (diurnal profiles)
@@ -182,4 +189,4 @@ The system successfully captured severe pollution during Diwali with PM concentr
 
 **Last Updated**: November 12, 2025  
 **Status**: Active / Tested during Diwali 2025  
-**Team**: Environmental Systems Workshop (ESW), IIIT Hyderabad
+**Team**: Venky Chicken, Environmental Systems Workshop (ESW), IIIT Hyderabad
