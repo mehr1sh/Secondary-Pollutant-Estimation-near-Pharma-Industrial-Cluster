@@ -1,4 +1,4 @@
-# Environmental Air Quality Monitoring System - Diwali Deployment
+# Environmental Air Quality Monitoring System
 
 ## Project Overview
 
